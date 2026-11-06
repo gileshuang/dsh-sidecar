@@ -1,0 +1,63 @@
+# 中继服务的 systemd 模板单元。
+#
+# 模板参数 %i = 运行该中继的用户名（同时也是实例名）：
+#   systemctl start   dsh-sidecar@alice
+#   systemctl status  dsh-sidecar@alice
+#   journalctl -u dsh-sidecar@alice -f
+#
+# 本文件里的 @BINDIR@ / @DOCDIR@ 是占位符，由 deploy/install.sh 或 PKGBUILD 替换后写入
+# /etc/systemd/system/dsh-sidecar@.service；请勿直接复制本文件使用。
+#
+# 单向依赖 deepseek-harness-bwrap@%i.service：
+#   Wants=  启动本单元时把同名的 dsh 实例一起拉起
+#   After=  保证 dsh 先启动（端口就绪由 ExecStartPre 轮询确认）
+#   PartOf= dsh 停止/重启时，本单元跟着停/重启
+#   反向不成立：停止本单元不影响 dsh。
+
+[Unit]
+Description=dsh-sidecar HTTP relay for %i
+Documentation=file:@DOCDIR@/README.md
+Wants=deepseek-harness-bwrap@%i.service
+After=deepseek-harness-bwrap@%i.service
+PartOf=deepseek-harness-bwrap@%i.service
+
+[Service]
+Type=simple
+User=%i
+# 不写 Group=，即使用该用户的主组。
+# systemd 会据此设置 HOME，中继默认从 ${HOME}/.dsh/.credentials.yaml 读取内核会话密钥，
+# 也可用 -credentials 或 YAML 配置项 credentials 指定其他路径。
+
+# 运行参数。需要按实例覆盖时用 drop-in 改这些值，不必重写 ExecStart：
+#   /etc/systemd/system/dsh-sidecar@<user>.service.d/override.conf
+#   [Service]
+#   Environment=SIDECAR_LISTEN=127.0.0.1:8089
+Environment=SIDECAR_LISTEN=127.0.0.1:8088
+Environment=SIDECAR_UPSTREAM=http://127.0.0.1:3080
+Environment=SIDECAR_REME=http://127.0.0.1:2333
+Environment=SIDECAR_EXTRA_ARGS=
+
+# 从 SIDECAR_UPSTREAM 解析 host:port 并轮询，等 dsh 真正监听后再启动，最多 20 秒。
+ExecStartPre=/bin/bash -c 'hp=$(echo "$SIDECAR_UPSTREAM" | sed -e "s|^[^:]*://||" -e "s|/.*||"); host=$(echo "$hp" | cut -d: -f1); port=$(echo "$hp" | cut -d: -f2); [ -n "$port" ] || port=80; for i in {1..100}; do (exec 3<>/dev/tcp/$host/$port) 2>/dev/null && exit 0; sleep 0.2; done; echo "upstream $hp 未就绪" >&2; exit 1'
+
+ExecStart=@BINDIR@/dsh-sidecar -listen ${SIDECAR_LISTEN} -upstream ${SIDECAR_UPSTREAM} -reme ${SIDECAR_REME} $SIDECAR_EXTRA_ARGS
+
+Restart=on-failure
+RestartSec=2s
+KillSignal=SIGTERM
+TimeoutStopSec=20s
+
+# 中继持有 dsh 内核会话密钥（可伪造任意会话），因此权限尽量收紧：
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictSUIDSGID=yes
+LimitNOFILE=8192
+
+[Install]
+WantedBy=multi-user.target

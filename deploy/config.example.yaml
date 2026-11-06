@@ -1,0 +1,37 @@
+# dsh-sidecar 配置示例
+#
+# 生效位置（自动探测，无需命令行参数）：
+#   ${XDG_CONFIG_HOME:-$HOME/.config}/dsh-sidecar/config.yaml
+# 也可以显式指定：dsh-sidecar -config /path/to/config.yaml
+#
+# 优先级：命令行参数 > 本文件 > 内置默认值。
+# 因此下面这些值只是"示例/默认"，命令行给了就用命令行的。
+
+# 监听地址。生产环境建议只绑回环，由 nginx 反代。
+listen: 127.0.0.1:8088
+
+# dsh web 上游地址。
+upstream: http://127.0.0.1:3080
+
+# ReMe 地址；浏览器侧的 /reme/* 会转发到这里。
+reme: http://127.0.0.1:2333
+
+# 内核会话密钥位置，二选一，credentials 优先于 dsh-home：
+# dsh-home: /home/alice/.dsh
+# credentials: /home/alice/.dsh/.credentials.yaml
+# 都不写时：先看 $DSH_HOME，再回退到 ~/.dsh。
+
+# 代签 Cookie 的有效期（Go duration 语法），内核上限 30 天。
+cookie-ttl: 168h
+
+# 是否向 index.html 注入 ownsHost 与 ReMe fetch 改写脚本。
+inject: true
+
+# /reme/* 是否要求携带有效的内核会话 Cookie。
+reme-auth: true
+
+# 是否禁止浏览器侧触发 auto_dream（「立即整理」）。
+reme-readonly: false
+
+# 是否为每个请求打印一行日志。
+verbose: false

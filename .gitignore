@@ -1,0 +1,25 @@
+# 构建产物
+.build/
+src/
+pkg/
+*.pkg.tar.zst
+*.pkg.tar.xz
+*.pkg.tar.gz
+*.src.tar.gz
+
+# 本地工具与缓存（install.sh / makepkg / go 可能在工程目录留下）
+.gocache/
+.gopath/
+.makepkg-test/
+.t/
+.tmp/
+*.log
+
+# 编辑器与系统文件
+*.swp
+*.swo
+*~
+.DS_Store
+
+# 本地覆盖配置
+config.local.yaml
