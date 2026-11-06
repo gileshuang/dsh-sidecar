@@ -28,19 +28,12 @@ User=%i
 # systemd 会据此设置 HOME，中继默认从 ${HOME}/.dsh/.credentials.yaml 读取内核会话密钥，
 # 也可用 -credentials 或 YAML 配置项 credentials 指定其他路径。
 
-# 运行参数。需要按实例覆盖时用 drop-in 改这些值，不必重写 ExecStart：
-#   /etc/systemd/system/dsh-sidecar@<user>.service.d/override.conf
-#   [Service]
-#   Environment=SIDECAR_LISTEN=127.0.0.1:8089
-Environment=SIDECAR_LISTEN=127.0.0.1:8088
-Environment=SIDECAR_UPSTREAM=http://127.0.0.1:3080
-Environment=SIDECAR_REME=http://127.0.0.1:2333
-Environment=SIDECAR_EXTRA_ARGS=
+# 单元不传任何参数、也不注入环境变量：
+# 配置来源是 ${XDG_CONFIG_HOME:-$HOME/.config}/dsh-sidecar/config.yaml，
+# 或用 -config 显式指定。单元里写 flag/env 会覆盖配置文件，因此这里保持空白。
+# 多实例需要不同端口时，改各自 home 下的配置文件即可。
 
-# 从 SIDECAR_UPSTREAM 解析 host:port 并轮询，等 dsh 真正监听后再启动，最多 20 秒。
-ExecStartPre=/bin/bash -c 'hp=$(echo "$SIDECAR_UPSTREAM" | sed -e "s|^[^:]*://||" -e "s|/.*||"); host=$(echo "$hp" | cut -d: -f1); port=$(echo "$hp" | cut -d: -f2); [ -n "$port" ] || port=80; for i in {1..100}; do (exec 3<>/dev/tcp/$host/$port) 2>/dev/null && exit 0; sleep 0.2; done; echo "upstream $hp 未就绪" >&2; exit 1'
-
-ExecStart=@BINDIR@/dsh-sidecar -listen ${SIDECAR_LISTEN} -upstream ${SIDECAR_UPSTREAM} -reme ${SIDECAR_REME} $SIDECAR_EXTRA_ARGS
+ExecStart=@BINDIR@/dsh-sidecar
 
 Restart=on-failure
 RestartSec=2s

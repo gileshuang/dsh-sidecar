@@ -27,6 +27,7 @@ dsh 的设计假设"浏览器就在本机"：
 | 页面注入 | 在 `index.html` 的 `<head>` 后注入两段脚本：`ownsHost=true`（让远程页面按本机处理）与 ReMe fetch 改写（`127.0.0.1:2333` → 同源 `/reme/*`） |
 | 透传 | HTTP、静态资源、HEAD、404、查询串、WebSocket 升级 |
 | `/reme/*` 准入 | 校验浏览器带来的 `dsh-auth-*`，只放行状态页用到的作业 |
+| 上游探活 | 启动时探测 dsh 端口，不可达则打印警告并每 2 秒重试，就绪后打印一条日志；中继本身不会退出 |
 
 **它不做的事**：不提供 TLS，不提供登录。认证仍由 `@xgone/dsh-remote` 负责——中继只是把它的会话
 原样转给 dsh，并借用它的登录结果保护 `/reme/*`。
@@ -111,12 +112,12 @@ sudo deploy/uninstall.sh -u alice --purge   # 连同安装目录删除
 | `After=` | 保证 dsh 先启动；端口就绪由 `ExecStartPre` 轮询确认 |
 | `PartOf=` | dsh 停止/重启时，中继跟着停/重启 |
 
-停止或重启中继**不会**影响 dsh。多用户场景下每个实例需要不同的 `-listen` 端口，用 drop-in 覆盖：
+停止或重启中继**不会**影响 dsh。单元本身不传任何参数、也不注入环境变量——
+配置一律走各自 home 下的 YAML 文件，避免单元里的 flag 覆盖配置文件。
+多用户场景下每个实例需要不同端口时，改 `/home/<user>/.config/dsh-sidecar/config.yaml` 即可：
 
-```ini
-# /etc/systemd/system/dsh-sidecar@alice.service.d/port.conf
-[Service]
-Environment=SIDECAR_LISTEN=127.0.0.1:8089
+```yaml
+listen: 127.0.0.1:8089
 ```
 
 ### Arch / pacman

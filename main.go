@@ -263,6 +263,7 @@ func main() {
 	}
 	s.cookieName, s.cookieValue = mintCookie(s.secret, s.authority, o.CookieTTL)
 	s.remeProxy = buildRemeProxy(reme)
+	go watchUpstream(up.Host)
 
 	srv := &http.Server{
 		Addr:              o.Listen,
@@ -311,6 +312,35 @@ func (s *sidecar) handler() http.Handler {
 			log.Printf("%s %s -> %d (%s)", r.Method, r.URL.RequestURI(), rec.status, time.Since(start).Round(time.Millisecond))
 		}
 	})
+}
+
+// probeUpstream 用 TCP 连接探测上游是否已在监听，仅用于启动期提示。
+func probeUpstream(addr string, timeout time.Duration) error {
+	conn, err := net.DialTimeout("tcp", addr, timeout)
+	if err != nil {
+		return err
+	}
+	return conn.Close()
+}
+
+// watchUpstream 在启动时探测一次上游；不可达就打印警告，并在后台每 2 秒重试，
+// 直到 dsh 就绪后打印一条"已就绪"。中继本身不因上游未就绪而退出：
+// 监听照常进行，dsh 起来之前的请求由每个请求的错误处理返回 502。
+func watchUpstream(addr string) {
+	if err := probeUpstream(addr, 3*time.Second); err == nil {
+		log.Printf("上游 %s 已就绪", addr)
+		return
+	}
+	log.Printf("警告: 上游 %s 暂不可达，中继继续监听；dsh 就绪前的请求将返回 502", addr)
+
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+	for range ticker.C {
+		if err := probeUpstream(addr, 2*time.Second); err == nil {
+			log.Printf("上游 %s 已就绪", addr)
+			return
+		}
+	}
 }
 
 // serveReme 把浏览器的 /reme/<job> 转发到 ReMe。
