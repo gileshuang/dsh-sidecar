@@ -22,7 +22,7 @@ dsh 的设计假设"浏览器就在本机"：
 
 | 行为 | 说明 |
 |---|---|
-| 代签内核 Cookie | 读 `.credentials.yaml` 里的会话密钥，按内核格式签发 `dsh-auth-*`，代浏览器通过 `/api` 校验 |
+| 代签内核 Cookie | 读 `.credentials.yaml` 里的会话密钥，按内核格式签发 `dsh-auth-*`，代浏览器通过 `/api` 校验；可用 `-mint-cookie=false` 关闭，交给 dsh 自带的认证页面 |
 | Host/Origin 归一化 | 转发前改写为上游 authority，满足内核的 loopback trust fence |
 | 页面注入 | 在 `index.html` 的 `<head>` 后注入两段脚本：`ownsHost=true`（让远程页面按本机处理）与 ReMe fetch 改写（`127.0.0.1:2333` → 同源 `/reme/*`） |
 | 透传 | HTTP、静态资源、HEAD、404、查询串、WebSocket 升级 |
@@ -55,6 +55,7 @@ go run . -listen 0.0.0.0:8088 -v           # 局域网调试
 | `-dsh-home` | `$DSH_HOME` 或 `~/.dsh` | 密钥目录 |
 | `-credentials` | 空 | 直接指定 `.credentials.yaml`，优先于 `-dsh-home` |
 | `-cookie-ttl` | `168h` | 代签 Cookie 有效期，内核上限 30 天 |
+| `-mint-cookie` | `true` | 是否代签内核 Cookie；`false` 时由 dsh 自带认证流程负责 |
 | `-inject` | `true` | 是否注入页面脚本 |
 | `-reme-auth` | `true` | `/reme/*` 是否要求有效内核 Cookie |
 | `-reme-readonly` | `false` | 禁止浏览器触发 `auto_dream`（立即整理） |
@@ -72,6 +73,7 @@ upstream: http://127.0.0.1:3080
 reme: http://127.0.0.1:2333
 credentials: /home/alice/.dsh/.credentials.yaml   # 或 dsh-home
 cookie-ttl: 168h
+mint-cookie: true
 inject: true
 reme-auth: true
 reme-readonly: false
@@ -88,6 +90,21 @@ verbose: false
 4. `~/.dsh`
 
 启动日志会打印最终使用的路径（不打印密钥本身）。
+
+### 关闭代签
+
+新版本 dsh 自带认证页面/认证流程时，中继不必再扮演浏览器签发 `dsh-auth-*`：
+加 `-mint-cookie=false`（或 YAML 里 `mint-cookie: false`）即可。
+
+关闭后：
+
+- 浏览器带来的内核 Cookie 原样透传给上游，由 dsh 自己校验；中继不再替换同名 Cookie，
+  也不再在 `/auth/logout` 上补一条清除指令；
+- `-reme-auth=true`（默认）仍会用同一密钥校验浏览器带来的 Cookie，名称规则不变
+  （`dsh-auth-<hash(authority)>`）。如果新认证流程签发的不是这种 Cookie，需要同时关掉
+  `-reme-auth`，否则 `/reme/*` 一律 401；
+- 代签与 `/reme` 准入都关闭时，中继不再读取 `.credentials.yaml`，密钥文件缺失也能启动；
+- Host/Origin 归一化、页面注入、透传等其他行为不变。
 
 ## 部署
 
@@ -109,7 +126,7 @@ sudo deploy/uninstall.sh -u alice --purge   # 连同安装目录删除
 | 指令 | 效果 |
 |---|---|
 | `Wants=` | 启动中继时把同名 dsh 实例一起拉起 |
-| `After=` | 保证 dsh 先启动；端口就绪由 `ExecStartPre` 轮询确认 |
+| `After=` | 保证 dsh 先启动；端口未就绪由中继自己探测，只告警不退出 |
 | `PartOf=` | dsh 停止/重启时，中继跟着停/重启 |
 
 停止或重启中继**不会**影响 dsh。单元本身不传任何参数、也不注入环境变量——

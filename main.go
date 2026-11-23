@@ -1,7 +1,8 @@
 // dsh-sidecar 是运行在 dsh 服务器上的独立中继。
 //
 // 当前版本（v0）只做 HTTP 中继，不含 TLS 与用户认证：
-//   - 从 ~/.dsh/.credentials.yaml 读取内核浏览器会话密钥，代浏览器签发 dsh-auth-* Cookie；
+//   - 从 ~/.dsh/.credentials.yaml 读取内核浏览器会话密钥，代浏览器签发 dsh-auth-* Cookie
+//     （dsh 0.2.3 后自带认证页面可用 -mint-cookie=false 关闭，由 dsh 自己签发）；
 //   - 把 Host/Origin 归一化为上游回环地址，满足内核的 loopback trust fence；
 //   - 在 index.html 里注入 __DSH_TRANSPORT__.ownsHost=true，让远程页面按本机处理；
 //   - 透传 HTTP、静态资源与 WebSocket 升级。
@@ -74,8 +75,9 @@ type sidecar struct {
 	upstream    *url.URL
 	authority   string // 上游 authority，用于 Cookie 绑定与 Host 改写
 	secret      []byte
-	cookieName  string
-	cookieValue string
+	cookieName  string // 内核会话 Cookie 的名称，由上游 authority 决定
+	cookieValue string // 代签的取值；禁用代签时为空
+	mint        bool   // 是否代签并替换浏览器带来的内核会话 Cookie
 	inject      bool
 	verbose     bool
 	remeAuth    bool
@@ -91,6 +93,7 @@ type options struct {
 	DSHHome      string
 	Credentials  string
 	CookieTTL    time.Duration
+	MintCookie   bool
 	Inject       bool
 	RemeAuth     bool
 	RemeReadonly bool
@@ -106,6 +109,7 @@ type fileConfig struct {
 	DSHHome      *string `yaml:"dsh-home"`
 	Credentials  *string `yaml:"credentials"`
 	CookieTTL    *string `yaml:"cookie-ttl"`
+	MintCookie   *bool   `yaml:"mint-cookie"`
 	Inject       *bool   `yaml:"inject"`
 	RemeAuth     *bool   `yaml:"reme-auth"`
 	RemeReadonly *bool   `yaml:"reme-readonly"`
@@ -175,6 +179,9 @@ func loadFileConfig(o *options) error {
 		}
 		o.CookieTTL = ttl
 	}
+	if fc.MintCookie != nil && !set["mint-cookie"] {
+		o.MintCookie = *fc.MintCookie
+	}
 	if fc.Inject != nil && !set["inject"] {
 		o.Inject = *fc.Inject
 	}
@@ -220,6 +227,7 @@ func main() {
 	flag.StringVar(&o.DSHHome, "dsh-home", "", "DSH_HOME 目录（默认 $DSH_HOME 或 ~/.dsh）")
 	flag.StringVar(&o.Credentials, "credentials", "", "内核会话密钥文件路径，优先于 -dsh-home")
 	flag.DurationVar(&o.CookieTTL, "cookie-ttl", defaultTTL, "代签 Cookie 有效期（上限 30 天）")
+	flag.BoolVar(&o.MintCookie, "mint-cookie", true, "代浏览器签发内核会话 Cookie；关闭后由 dsh 自带认证负责")
 	flag.BoolVar(&o.Inject, "inject", true, "向 index.html 注入 ownsHost 与 ReMe 改写脚本")
 	flag.BoolVar(&o.RemeAuth, "reme-auth", true, "要求 /reme/* 携带有效的内核会话 Cookie")
 	flag.BoolVar(&o.RemeReadonly, "reme-readonly", false, "禁止浏览器侧触发 auto_dream")
@@ -247,21 +255,31 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	secret, err := loadSecret(credPath)
-	if err != nil {
-		log.Fatalf("读取内核会话密钥失败（%s）: %v", credPath, err)
-	}
 
 	s := &sidecar{
 		upstream:  up,
 		authority: up.Host,
-		secret:    secret,
+		mint:      o.MintCookie,
 		inject:    o.Inject,
 		verbose:   o.Verbose,
 		remeAuth:  o.RemeAuth,
 		shim:      []byte("<script>" + transportShim + "</script><script>" + remeShim + "</script>"),
 	}
-	s.cookieName, s.cookieValue = mintCookie(s.secret, s.authority, o.CookieTTL)
+	s.cookieName = cookieNameFor(s.authority)
+
+	// 密钥只服务于两件事：代签 Cookie、校验浏览器带来的 Cookie（/reme/* 准入）。
+	// 两者都关掉时不必读密钥文件，缺文件也能启动。
+	if o.MintCookie || o.RemeAuth {
+		secret, err := loadSecret(credPath)
+		if err != nil {
+			log.Fatalf("读取内核会话密钥失败（%s）: %v", credPath, err)
+		}
+		s.secret = secret
+	}
+	if o.MintCookie {
+		s.cookieValue = mintCookie(s.secret, s.authority, o.CookieTTL)
+	}
+
 	s.remeProxy = buildRemeProxy(reme)
 	go watchUpstream(up.Host)
 
@@ -272,8 +290,8 @@ func main() {
 		IdleTimeout:       90 * time.Second,
 	}
 
-	log.Printf("dsh-sidecar 启动: listen=%s upstream=%s reme=%s credentials=%s cookie=%s ttl=%s inject=%v reme-write=%v reme-auth=%v",
-		o.Listen, up.String(), reme.String(), credPath, s.cookieName, o.CookieTTL.String(), o.Inject, !o.RemeReadonly, o.RemeAuth)
+	log.Printf("dsh-sidecar 启动: listen=%s upstream=%s reme=%s credentials=%s cookie=%s mint-cookie=%v ttl=%s inject=%v reme-write=%v reme-auth=%v",
+		o.Listen, up.String(), reme.String(), credPath, s.cookieName, o.MintCookie, o.CookieTTL.String(), o.Inject, !o.RemeReadonly, o.RemeAuth)
 	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatal(err)
 	}
@@ -405,14 +423,17 @@ func (s *sidecar) rewriteHeaders(req *http.Request) {
 	}
 
 	// 丢弃上游带来的同名旧 Cookie，换成我们的；其他 Cookie 原样保留。
-	cookies := req.Cookies()
-	req.Header.Del("Cookie")
-	for _, c := range cookies {
-		if c.Name != s.cookieName {
-			req.AddCookie(c)
+	// 禁用代签时浏览器带来的内核 Cookie 原样透传，由 dsh 自己校验。
+	if s.mint {
+		cookies := req.Cookies()
+		req.Header.Del("Cookie")
+		for _, c := range cookies {
+			if c.Name != s.cookieName {
+				req.AddCookie(c)
+			}
 		}
+		req.AddCookie(&http.Cookie{Name: s.cookieName, Value: s.cookieValue})
 	}
-	req.AddCookie(&http.Cookie{Name: s.cookieName, Value: s.cookieValue})
 
 	// 关掉压缩，ModifyResponse 才能安全改写 HTML。
 	req.Header.Set("Accept-Encoding", "identity")
@@ -446,12 +467,16 @@ func (s *sidecar) modifyResponse(resp *http.Response) error {
 	return nil
 }
 
-// mintCookie 复刻内核对浏览器会话 Cookie 的约定：
-// 名称 = dsh-auth-<base64url(sha256(authority))>，值 = v1.<base64url(JSON)>.<base64url(HMAC-SHA256)>。
-func mintCookie(secret []byte, authority string, ttl time.Duration) (name, value string) {
+// cookieNameFor 复刻内核对浏览器会话 Cookie 名称的约定：
+// dsh-auth-<base64url(sha256(authority))>。名称只由 authority 决定，与代签开关无关。
+func cookieNameFor(authority string) string {
 	sum := sha256.Sum256([]byte(authority))
-	name = authCookiePrefix + base64.RawURLEncoding.EncodeToString(sum[:])
+	return authCookiePrefix + base64.RawURLEncoding.EncodeToString(sum[:])
+}
 
+// mintCookie 复刻内核对浏览器会话 Cookie 取值的约定：
+// v1.<base64url(JSON)>.<base64url(HMAC-SHA256)>。
+func mintCookie(secret []byte, authority string, ttl time.Duration) string {
 	now := time.Now().UnixMilli()
 	payload := struct {
 		Version   int    `json:"version"`
@@ -467,7 +492,7 @@ func mintCookie(secret []byte, authority string, ttl time.Duration) (name, value
 	body := base64.RawURLEncoding.EncodeToString(raw)
 	mac := hmac.New(sha256.New, secret)
 	mac.Write([]byte(body))
-	return name, "v1." + body + "." + base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
+	return "v1." + body + "." + base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
 }
 
 // hasCoreSession 检查请求里是否带有效的内核会话 Cookie。
@@ -481,7 +506,11 @@ func (s *sidecar) hasCoreSession(r *http.Request) bool {
 }
 
 // verifyCoreCookie 校验 v1.<b64url(JSON)>.<b64url(HMAC)> 的签名、authority 与有效期。
+// 没有密钥（代签与 /reme 准入都关闭）时一律不通过，避免空密钥签出可被伪造的 Cookie。
 func verifyCoreCookie(value string, secret []byte, authority string) bool {
+	if len(secret) == 0 {
+		return false
+	}
 	parts := strings.Split(value, ".")
 	if len(parts) != 3 || parts[0] != "v1" {
 		return false
@@ -520,7 +549,11 @@ func verifyCoreCookie(value string, secret []byte, authority string) bool {
 
 // maybeClearSessionCookie 在登出成功后清掉浏览器侧的内核 Cookie，
 // 否则登出后那条 Cookie 仍然有效，/reme 依旧放行。
+// 禁用代签时不碰浏览器 Cookie：它不是本中继写下的，清理由 dsh 自己的登出流程负责。
 func (s *sidecar) maybeClearSessionCookie(resp *http.Response) {
+	if !s.mint {
+		return
+	}
 	if resp.Request == nil || resp.Request.URL == nil || resp.Request.URL.Path != "/auth/logout" {
 		return
 	}

@@ -24,6 +24,11 @@ reme: http://127.0.0.1:2333
 # 代签 Cookie 的有效期（Go duration 语法），内核上限 30 天。
 cookie-ttl: 168h
 
+# 是否代浏览器签发内核会话 Cookie。
+# 新版本 dsh 自带认证页面后可设为 false：浏览器带来的 Cookie 原样透传给上游，
+# 由 dsh 自己校验。注意 /reme/* 的准入仍要求同格式的内核 Cookie（reme-auth）。
+mint-cookie: true
+
 # 是否向 index.html 注入 ownsHost 与 ReMe fetch 改写脚本。
 inject: true
 

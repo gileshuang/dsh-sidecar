@@ -10,7 +10,7 @@
 #
 # 单向依赖 deepseek-harness-bwrap@%i.service：
 #   Wants=  启动本单元时把同名的 dsh 实例一起拉起
-#   After=  保证 dsh 先启动（端口就绪由 ExecStartPre 轮询确认）
+#   After=  保证 dsh 先启动（端口未就绪由中继自己探测，只告警不退出）
 #   PartOf= dsh 停止/重启时，本单元跟着停/重启
 #   反向不成立：停止本单元不影响 dsh。
 
