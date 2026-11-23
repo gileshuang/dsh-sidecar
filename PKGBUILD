@@ -6,7 +6,7 @@
 # 源码来自本目录（makepkg 在 PKGBUILD 所在处运行），依赖已 vendor，构建不需要联网。
 
 pkgname=dsh-sidecar
-pkgver=0.1.0
+pkgver=0.1.1
 pkgrel=1
 pkgdesc="Loopback relay that lets a remote browser use dsh web and the ReMe status page"
 arch=('x86_64' 'aarch64')
