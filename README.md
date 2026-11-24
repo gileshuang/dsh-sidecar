@@ -9,25 +9,27 @@ dsh 的设计假设"浏览器就在本机"：
 
 1. `/api` 与页面要求一个绑定 Host 的签名 Cookie（`dsh-auth-<hash>`），只有从 `?token=` 换取；
 2. 客户端把"是否本机"写进页面逻辑，远程访问时部分功能会降级；
-3. ReMe 状态页在浏览器里直接 fetch `http://127.0.0.1:2333`——远程浏览器访问的是自己的回环。
+3. ReMe 状态页在浏览器里直接 fetch `http://127.0.0.1:2333`——远程浏览器访问的是自己的回环；
+4. 部分插件如 [任务中心](https://github.com/ds-hu/dsh-auto-task-center) 需要被匿名访问 webhook；
 
 中继在服务端扮演"浏览器"，把这三件事补上，再把结果以普通 HTTP 暴露给 nginx。
 
-```
+``` plaintext
 浏览器 ──▶ nginx(TLS) ──▶ dsh-sidecar :8088 ──▶ dsh web  127.0.0.1:3080
+                                          └──▶ dsh web public path 127.0.0.1:3080 （例如插件提供的的 webhook）
                                           └──▶ ReMe    127.0.0.1:2333  （仅 /reme/*）
 ```
 
 ## 它做了什么
 
-| 行为 | 说明 |
-|---|---|
-| 代签内核 Cookie | 读 `.credentials.yaml` 里的会话密钥，按内核格式签发 `dsh-auth-*`，代浏览器通过 `/api` 校验；可用 `-mint-cookie=false` 关闭，交给 dsh 自带的认证页面 |
-| Host/Origin 归一化 | 转发前改写为上游 authority，满足内核的 loopback trust fence |
-| 页面注入 | 在 `index.html` 的 `<head>` 后注入两段脚本：`ownsHost=true`（让远程页面按本机处理）与 ReMe fetch 改写（`127.0.0.1:2333` → 同源 `/reme/*`） |
-| 透传 | HTTP、静态资源、HEAD、404、查询串、WebSocket 升级 |
-| `/reme/*` 准入 | 校验浏览器带来的 `dsh-auth-*`，只放行状态页用到的作业 |
-| 上游探活 | 启动时探测 dsh 端口，不可达则打印警告并每 2 秒重试，就绪后打印一条日志；中继本身不会退出 |
+| 行为               | 说明                                                                                                                                                                                                |
+| ------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 代签内核 Cookie    | 读 `.credentials.yaml` 里的会话密钥，按内核格式签发 `dsh-auth-*`，代浏览器通过 `/api` 校验；可用 `-mint-cookie=false` 关闭，交给 dsh 自带的认证页面；可用 `-public-path` 通过代签方式开放免认证路径 |
+| Host/Origin 归一化 | 转发前改写为上游 authority，满足内核的 loopback trust fence                                                                                                                                         |
+| 页面注入           | 在 `index.html` 的 `<head>` 后注入两段脚本：`ownsHost=true`（让远程页面按本机处理）与 ReMe fetch 改写（`127.0.0.1:2333` → 同源 `/reme/*`）                                                          |
+| 透传               | HTTP、静态资源、HEAD、404、查询串、WebSocket 升级                                                                                                                                                   |
+| `/reme/*` 准入     | 校验浏览器带来的 `dsh-auth-*`，只放行状态页用到的作业                                                                                                                                               |
+| 上游探活           | 启动时探测 dsh 端口，不可达则打印警告并每 2 秒重试，就绪后打印一条日志；中继本身不会退出                                                                                                            |
 
 **它不做的事**：不提供 TLS，不提供登录。认证仍由 `@xgone/dsh-remote` 负责——中继只是把它的会话
 原样转给 dsh，并借用它的登录结果保护 `/reme/*`。
@@ -47,20 +49,21 @@ go run . -listen 0.0.0.0:8088 -v           # 局域网调试
 
 ### 命令行
 
-| 参数 | 默认值 | 说明 |
-|---|---|---|
-| `-listen` | `127.0.0.1:8088` | 监听地址 |
-| `-upstream` | `http://127.0.0.1:3080` | dsh web 地址 |
-| `-reme` | `http://127.0.0.1:2333` | ReMe 地址 |
-| `-dsh-home` | `$DSH_HOME` 或 `~/.dsh` | 密钥目录 |
-| `-credentials` | 空 | 直接指定 `.credentials.yaml`，优先于 `-dsh-home` |
-| `-cookie-ttl` | `168h` | 代签 Cookie 有效期，内核上限 30 天 |
-| `-mint-cookie` | `true` | 是否代签内核 Cookie；`false` 时由 dsh 自带认证流程负责 |
-| `-inject` | `true` | 是否注入页面脚本 |
-| `-reme-auth` | `true` | `/reme/*` 是否要求有效内核 Cookie |
-| `-reme-readonly` | `false` | 禁止浏览器触发 `auto_dream`（立即整理） |
-| `-v` | `false` | 打印每个请求 |
-| `-config` | 空 | YAML 配置文件路径 |
+| 参数             | 默认值                  | 说明                                                   |
+| ---------------- | ----------------------- | ------------------------------------------------------ |
+| `-listen`        | `127.0.0.1:8088`        | 监听地址                                               |
+| `-upstream`      | `http://127.0.0.1:3080` | dsh web 地址                                           |
+| `-reme`          | `http://127.0.0.1:2333` | ReMe 地址                                              |
+| `-dsh-home`      | `$DSH_HOME` 或 `~/.dsh` | 密钥目录                                               |
+| `-credentials`   | 空                      | 直接指定 `.credentials.yaml`，优先于 `-dsh-home`       |
+| `-cookie-ttl`    | `168h`                  | 代签 Cookie 有效期，内核上限 30 天                     |
+| `-mint-cookie`   | `true`                  | 是否代签内核 Cookie；`false` 时由 dsh 自带认证流程负责 |
+| `-inject`        | `true`                  | 是否注入页面脚本                                       |
+| `-reme-auth`     | `true`                  | `/reme/*` 是否要求有效内核 Cookie                      |
+| `-reme-readonly` | `false`                 | 禁止浏览器触发 `auto_dream`（立即整理）                |
+| `-public-path`   | 空                      | 允许跨域访问的静态资源路径，可多次添加以追加           |
+| `-v`             | `false`                 | 打印每个请求                                           |
+| `-config`        | 空                      | YAML 配置文件路径                                      |
 
 ### YAML
 
@@ -77,6 +80,7 @@ mint-cookie: true
 inject: true
 reme-auth: true
 reme-readonly: false
+public-path: []
 verbose: false
 ```
 
@@ -105,6 +109,7 @@ verbose: false
   `-reme-auth`，否则 `/reme/*` 一律 401；
 - 代签与 `/reme` 准入都关闭时，中继不再读取 `.credentials.yaml`，密钥文件缺失也能启动；
 - Host/Origin 归一化、页面注入、透传等其他行为不变。
+- 使用 `-public-path` 指定的路径**依然会执行代签**，以允许外部免认证访问。
 
 ## 部署
 
@@ -123,11 +128,11 @@ sudo deploy/uninstall.sh -u alice --purge   # 连同安装目录删除
 单元是模板，实例名即用户名：`dsh-sidecar@alice.service`。它与 dsh 的单元
 `deepseek-harness-bwrap@%i.service` 构成**单向依赖**：
 
-| 指令 | 效果 |
-|---|---|
-| `Wants=` | 启动中继时把同名 dsh 实例一起拉起 |
-| `After=` | 保证 dsh 先启动；端口未就绪由中继自己探测，只告警不退出 |
-| `PartOf=` | dsh 停止/重启时，中继跟着停/重启 |
+| 指令      | 效果                                                    |
+| --------- | ------------------------------------------------------- |
+| `Wants=`  | 启动中继时把同名 dsh 实例一起拉起                       |
+| `After=`  | 保证 dsh 先启动；端口未就绪由中继自己探测，只告警不退出 |
+| `PartOf=` | dsh 停止/重启时，中继跟着停/重启                        |
 
 停止或重启中继**不会**影响 dsh。单元本身不传任何参数、也不注入环境变量——
 配置一律走各自 home 下的 YAML 文件，避免单元里的 flag 覆盖配置文件。

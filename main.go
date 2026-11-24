@@ -83,6 +83,7 @@ type sidecar struct {
 	remeAuth    bool
 	shim        []byte
 	remeProxy   *httputil.ReverseProxy
+	publicPath  []string
 }
 
 // options 汇总可配置项。优先级：命令行 > YAML 配置文件 > 默认值。
@@ -97,23 +98,25 @@ type options struct {
 	Inject       bool
 	RemeAuth     bool
 	RemeReadonly bool
+	PublicPath   []string
 	Verbose      bool
 	ConfigPath   string
 }
 
 // fileConfig 是 YAML 配置文件的结构。字段用指针，以便区分“未出现”和“显式零值”。
 type fileConfig struct {
-	Listen       *string `yaml:"listen"`
-	Upstream     *string `yaml:"upstream"`
-	Reme         *string `yaml:"reme"`
-	DSHHome      *string `yaml:"dsh-home"`
-	Credentials  *string `yaml:"credentials"`
-	CookieTTL    *string `yaml:"cookie-ttl"`
-	MintCookie   *bool   `yaml:"mint-cookie"`
-	Inject       *bool   `yaml:"inject"`
-	RemeAuth     *bool   `yaml:"reme-auth"`
-	RemeReadonly *bool   `yaml:"reme-readonly"`
-	Verbose      *bool   `yaml:"verbose"`
+	Listen       *string  `yaml:"listen"`
+	Upstream     *string  `yaml:"upstream"`
+	Reme         *string  `yaml:"reme"`
+	DSHHome      *string  `yaml:"dsh-home"`
+	Credentials  *string  `yaml:"credentials"`
+	CookieTTL    *string  `yaml:"cookie-ttl"`
+	MintCookie   *bool    `yaml:"mint-cookie"`
+	Inject       *bool    `yaml:"inject"`
+	RemeAuth     *bool    `yaml:"reme-auth"`
+	RemeReadonly *bool    `yaml:"reme-readonly"`
+	PublicPath   []string `yaml:"public-path"`
+	Verbose      *bool    `yaml:"verbose"`
 }
 
 // defaultConfigPath 返回自动探测的配置路径；无法确定 HOME 时返回空串。
@@ -191,6 +194,9 @@ func loadFileConfig(o *options) error {
 	if fc.RemeReadonly != nil && !set["reme-readonly"] {
 		o.RemeReadonly = *fc.RemeReadonly
 	}
+	if len(fc.PublicPath) > 0 {
+		o.PublicPath = append(o.PublicPath, fc.PublicPath...)
+	}
 	if fc.Verbose != nil && !set["v"] {
 		o.Verbose = *fc.Verbose
 	}
@@ -231,6 +237,13 @@ func main() {
 	flag.BoolVar(&o.Inject, "inject", true, "向 index.html 注入 ownsHost 与 ReMe 改写脚本")
 	flag.BoolVar(&o.RemeAuth, "reme-auth", true, "要求 /reme/* 携带有效的内核会话 Cookie")
 	flag.BoolVar(&o.RemeReadonly, "reme-readonly", false, "禁止浏览器侧触发 auto_dream")
+	flag.Func("public-path", "公开路径，不进行认证；可多次传入多个路径", func(path string) error {
+		if path == "" {
+			return fmt.Errorf("路径不能为空")
+		}
+		o.PublicPath = append(o.PublicPath, path)
+		return nil
+	})
 	flag.BoolVar(&o.Verbose, "v", false, "打印每个请求")
 	flag.StringVar(&o.ConfigPath, "config", "", "YAML 配置文件；留空则探测 $XDG_CONFIG_HOME/dsh-sidecar/config.yaml")
 	flag.Parse()
@@ -257,13 +270,14 @@ func main() {
 	}
 
 	s := &sidecar{
-		upstream:  up,
-		authority: up.Host,
-		mint:      o.MintCookie,
-		inject:    o.Inject,
-		verbose:   o.Verbose,
-		remeAuth:  o.RemeAuth,
-		shim:      []byte("<script>" + transportShim + "</script><script>" + remeShim + "</script>"),
+		upstream:   up,
+		authority:  up.Host,
+		mint:       o.MintCookie,
+		inject:     o.Inject,
+		verbose:    o.Verbose,
+		remeAuth:   o.RemeAuth,
+		publicPath: o.PublicPath,
+		shim:       []byte("<script>" + transportShim + "</script><script>" + remeShim + "</script>"),
 	}
 	s.cookieName = cookieNameFor(s.authority)
 
@@ -275,8 +289,6 @@ func main() {
 			log.Fatalf("读取内核会话密钥失败（%s）: %v", credPath, err)
 		}
 		s.secret = secret
-	}
-	if o.MintCookie {
 		s.cookieValue = mintCookie(s.secret, s.authority, o.CookieTTL)
 	}
 
@@ -317,12 +329,33 @@ func (s *sidecar) handler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		rec := &statusRecorder{ResponseWriter: w}
 		start := time.Now()
+
+		// 检查当前路径是否在代签白名单中。
+		pathIsPublic := false
+		for _, p := range s.publicPath {
+			if strings.HasPrefix(r.URL.Path, p) {
+				pathIsPublic = true
+				break
+			}
+		}
+
 		switch {
 		case r.URL.Path == "/_sidecar/health":
 			_, _ = io.WriteString(rec, "ok\n")
 			return
 		case strings.HasPrefix(r.URL.Path, "/reme/"):
 			s.serveReme(rec, r)
+		case pathIsPublic:
+			// 为 Public 路径代签 Cookie
+			cookies := r.Cookies()
+			r.Header.Del("Cookie")
+			for _, c := range cookies {
+				if c.Name != s.cookieName {
+					r.AddCookie(c)
+				}
+			}
+			r.AddCookie(&http.Cookie{Name: s.cookieName, Value: s.cookieValue})
+			proxy.ServeHTTP(rec, r)
 		default:
 			proxy.ServeHTTP(rec, r)
 		}

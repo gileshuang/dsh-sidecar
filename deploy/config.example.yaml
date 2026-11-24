@@ -38,5 +38,9 @@ reme-auth: true
 # 是否禁止浏览器侧触发 auto_dream（「立即整理」）。
 reme-readonly: false
 
+# 即使 `mint-cookie: true` 禁用了代签 Cookie，也允许以下路径代签，以允许公开访问指定路径。
+public-path:
+  - /example/task-center/hook
+
 # 是否为每个请求打印一行日志。
 verbose: false
